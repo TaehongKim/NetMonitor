@@ -3,3 +3,6 @@ WifiRoute.config.json
 WifiRoute.default.json
 WifiRoute.log
 *.lnk
+
+bin/
+obj/
