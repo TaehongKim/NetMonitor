@@ -206,7 +206,8 @@ namespace NetMonitor
         {
             mon = monitor; settings = cfg; demo = demoMode;
             graph = new GraphPanel(mon);
-            Text = "NetMonitor"; Size = new Size(960, 600); StartPosition = FormStartPosition.CenterScreen;
+            Text = "NetMonitor v" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
+            Size = new Size(960, 600); StartPosition = FormStartPosition.CenterScreen;
             Font = SystemFonts.MessageBoxFont;
 
             BuildConnTab(); BuildGraphTab(); BuildRulesTab(); BuildSettingsTab();
@@ -400,6 +401,12 @@ namespace NetMonitor
             if (status != "연결됨") it.ForeColor = SystemColors.GrayText;
             it.Checked = free;
             lvAdapters.Items.Add(it);
+        }
+
+        public void SelectSettings()
+        {
+            tabs.SelectedTab = tabSettings;
+            RefreshSettingsList();
         }
 
         public void RefreshSettingsList()

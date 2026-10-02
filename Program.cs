@@ -1,10 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle("NetMonitor")]
+[assembly: AssemblyDescription("Per-destination routing across multiple network adapters, with live monitoring")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 namespace NetMonitor
 {
@@ -58,6 +64,13 @@ namespace NetMonitor
             timer.Start();
 
             form.RefreshRules();
+            if (!settings.Configured && !demo)
+            {
+                // 첫 실행: 무료/유료 어댑터를 정하도록 설정 탭부터 보여준다 (자동 시작이면 알림만)
+                form.SelectSettings();
+                if (startHidden)
+                    notify.ShowBalloonTip(8000, "NetMonitor", "무료 어댑터를 지정하면 유료망 감지가 켜집니다. 트레이 아이콘을 열어 설정 탭에서 지정하세요.", ToolTipIcon.Info);
+            }
             if (!startHidden) ShowWindow();
         }
 
@@ -79,7 +92,8 @@ namespace NetMonitor
                     if (v > paid) { paid = v; paidName = s.Name; }
                 }
             }
-            bool paidActive = paid >= settings.PaidThresholdKBps * 1024;
+            // 무료 어댑터를 아직 지정하지 않았다면(첫 실행) 유료망 감지를 켜지 않는다
+            bool paidActive = settings.Configured && paid >= settings.PaidThresholdKBps * 1024;
             int bad = ruleBad;
             State next = paidActive ? State.Paid : (bad > 0 ? State.RuleBad : State.Ok);
 
@@ -96,6 +110,12 @@ namespace NetMonitor
                 tip = "라우팅 이상 " + bad + "건: " + ruleBadText;
                 status = "● 라우팅 경로 이상 " + bad + "건: " + ruleBadText + "  (라우팅 규칙 탭에서 확인)";
                 color = Color.Goldenrod;
+            }
+            else if (!settings.Configured)
+            {
+                tip = "무료 어댑터 미설정 ↓" + Store.FormatRate(rx);
+                status = "● 무료 어댑터가 아직 설정되지 않아 유료망 감지가 꺼져 있습니다 - 설정 탭에서 지정하세요";
+                color = Color.SlateGray;
             }
             else
             {

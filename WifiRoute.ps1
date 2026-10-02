@@ -87,7 +87,9 @@ function Get-Config {
 
 function Save-Config {
     param($ConfigList)
-    ConvertTo-Json -InputObject @($ConfigList) -Depth 5 -AsArray | Set-Content -Path $ConfigPath -Encoding UTF8
+    # -AsArray는 PowerShell 7+ 전용이라 Windows PowerShell 5.1에서는 실패한다.
+    # -InputObject로 배열을 통째로 넘기면 5.1에서도 항상 JSON 배열([...])로 직렬화된다.
+    ConvertTo-Json -InputObject @($ConfigList) -Depth 5 | Set-Content -Path $ConfigPath -Encoding UTF8
 }
 
 # ── 기본(디폴트) 인터페이스 고정 ─────────────────────────────

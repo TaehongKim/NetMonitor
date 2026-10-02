@@ -288,20 +288,23 @@ namespace NetMonitor
     {
         public List<FreeEntry> FreeAdapters = new List<FreeEntry>();
         public double PaidThresholdKBps = 5;
+        public bool Configured;      // 사용자가 무료/유료 어댑터를 한 번이라도 저장했는지
 
         static string PathOf { get { return Path.Combine(Store.Dir, "NetMonitor.settings.json"); } }
 
         public static Settings Load()
         {
+            // 파일이 없으면 미설정(Configured=false): 어떤 어댑터가 무료인지 가정하지 않고,
+            // 사용자가 설정 탭에서 저장하기 전까지 유료망 감지를 켜지 않는다.
             Settings s = new Settings();
-            FreeEntry def = new FreeEntry(); def.Name = "Wi-Fi 4";
-            s.FreeAdapters.Add(def);
             try
             {
-                if (!File.Exists(PathOf)) { s.Save(); return s; }   // 처음 실행하면 기본값 파일 생성
+                if (!File.Exists(PathOf)) return s;
                 Dictionary<string, object> d = new JavaScriptSerializer()
                     .DeserializeObject(File.ReadAllText(PathOf)) as Dictionary<string, object>;
                 if (d == null) return s;
+                // Configured 키가 없는 예전 파일은 이미 설정해 쓰던 것이므로 설정됨으로 간주
+                s.Configured = !d.ContainsKey("Configured") || Convert.ToBoolean(d["Configured"]);
                 object[] arr = d.ContainsKey("FreeAdapters") ? d["FreeAdapters"] as object[] : null;
                 if (arr != null)
                 {
@@ -338,7 +341,8 @@ namespace NetMonitor
                     list.Add(eo);
                 }
                 Dictionary<string, object> d = new Dictionary<string, object>();
-                d["FreeAdapters"] = list; d["PaidThresholdKBps"] = PaidThresholdKBps;
+                Configured = true;
+                d["Configured"] = true; d["FreeAdapters"] = list; d["PaidThresholdKBps"] = PaidThresholdKBps;
                 File.WriteAllText(PathOf, new JavaScriptSerializer().Serialize(d));
             }
             catch { }
