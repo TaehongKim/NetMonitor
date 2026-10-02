@@ -1,0 +1,7 @@
+﻿[
+    {
+        "Target": "example.com",
+        "InterfaceAlias": ["Wi-Fi", "Wi-Fi 2"],
+        "Metric": 1
+    }
+]

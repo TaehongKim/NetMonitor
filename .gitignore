@@ -1,0 +1,5 @@
+﻿# 개인 설정/로그 (머신별로 다름)
+WifiRoute.config.json
+WifiRoute.default.json
+WifiRoute.log
+*.lnk
