@@ -192,6 +192,12 @@ namespace NetMonitor
         readonly List<Button> ruleButtons = new List<Button>();
 
         public bool AllowExit;
+        readonly Label statusLabel = new Label();
+
+        public void SetStatus(string text, Color color)
+        {
+            statusLabel.Text = text; statusLabel.BackColor = color;
+        }
 
         public MainForm(ThroughputMonitor monitor)
         {
@@ -204,6 +210,12 @@ namespace NetMonitor
             tabs.Dock = DockStyle.Fill;
             tabs.TabPages.AddRange(new TabPage[] { tabConn, tabGraph, tabRules });
             Controls.Add(tabs);
+
+            // 하단 상태 표시줄: 트레이 아이콘과 같은 신호등 상태를 보여줌
+            statusLabel.Dock = DockStyle.Bottom; statusLabel.Height = 26;
+            statusLabel.TextAlign = ContentAlignment.MiddleLeft; statusLabel.Padding = new Padding(8, 0, 0, 0);
+            statusLabel.ForeColor = Color.White; statusLabel.BackColor = Color.SeaGreen; statusLabel.Text = "상태 확인 중...";
+            Controls.Add(statusLabel);
 
             connTimer.Interval = 3000;
             connTimer.Tick += delegate { if (Visible && tabs.SelectedTab == tabConn) RefreshConnections(); };
@@ -367,7 +379,7 @@ namespace NetMonitor
             {
                 List<Rule> rules = Store.LoadRulesWithStatus();
                 string def = Store.DefaultInterface();
-                bool task = Store.AutoSyncInstalled();
+                string task = Store.AutoSyncStatus();
                 try
                 {
                     BeginInvoke((MethodInvoker)delegate
@@ -382,7 +394,7 @@ namespace NetMonitor
                         }
                         ruleByIp = map;
                         lblInfo.Text = (def != null ? "기본 인터페이스 고정: " + def : "기본 인터페이스 고정: 없음 (Windows 자동)")
-                            + "\r\n" + (task ? "자동 동기화: 설치됨" : "자동 동기화: 설치 안 됨");
+                            + "\r\n자동 동기화: " + task;
                     });
                 }
                 catch (InvalidOperationException) { }   // 창 핸들이 아직 없거나 이미 닫힌 경우

@@ -192,8 +192,43 @@ namespace NetMonitor
             using (Process p = Process.Start(psi)) { p.WaitForExit(); }
         }
 
-        public static bool AutoSyncInstalled()
+        // 동기화 로그의 마지막 '동기화 종료' 시각. 줄 형식: [2026-10-02 12:20:34] ===== 동기화 종료 =====
+        public static DateTime? LastSyncTime()
         {
+            try
+            {
+                string path = Path.Combine(Dir, "WifiRoute.log");
+                if (!File.Exists(path)) return null;
+                string tail;
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    long len = Math.Min(fs.Length, 16384);
+                    fs.Seek(-len, SeekOrigin.End);
+                    byte[] buf = new byte[len];
+                    int read = fs.Read(buf, 0, buf.Length);
+                    tail = System.Text.Encoding.UTF8.GetString(buf, 0, read);
+                }
+                string[] lines = tail.Split('\n');
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    string l = lines[i].Trim();
+                    if (l.Length < 21 || l[0] != '[' || l.IndexOf("동기화 종료", StringComparison.Ordinal) < 0) continue;
+                    DateTime dt;
+                    if (DateTime.TryParseExact(l.Substring(1, 19), "yyyy-MM-dd HH:mm:ss",
+                        System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out dt)) return dt;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // 작업이 SYSTEM 소유라 일반 권한에서는 schtasks 조회가 "Access is denied"로 막힘.
+        // 그래서 (1) 로그가 최근 갱신됐는지, (2) 조회 결과가 '없음'이 아닌 '권한 거부'인지로 판단한다.
+        public static string AutoSyncStatus()
+        {
+            DateTime? last = LastSyncTime();
+            string when = last.HasValue ? " · 마지막 동기화 " + last.Value.ToString("MM-dd HH:mm") : "";
+            if (last.HasValue && (DateTime.Now - last.Value).TotalMinutes <= 10) return "설치됨" + when;
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", "/query /tn WifiRouteSync");
@@ -201,11 +236,16 @@ namespace NetMonitor
                 psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
                 using (Process p = Process.Start(psi))
                 {
-                    p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); p.WaitForExit();
-                    return p.ExitCode == 0;
+                    string text = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                    p.WaitForExit();
+                    if (p.ExitCode == 0) return "설치됨" + when;
+                    string lower = text.ToLowerInvariant();
+                    if (lower.Contains("denied") || text.Contains("거부") || text.Contains("액세스"))
+                        return "설치된 것으로 추정 (권한 때문에 조회 불가, 최근 동기화 기록 없음)" + when;
                 }
             }
-            catch { return false; }
+            catch { }
+            return "설치 안 됨" + when;
         }
 
         public static string FormatRate(double bps)
@@ -213,6 +253,56 @@ namespace NetMonitor
             if (bps >= 1048576) return (bps / 1048576).ToString("N1") + " MB/s";
             if (bps >= 1024) return (bps / 1024).ToString("N1") + " KB/s";
             return bps.ToString("N0") + " B/s";
+        }
+    }
+
+    // ── 설정: 무료 어댑터 / 유료 판정 임계 속도 (NetMonitor.settings.json) ──
+    public class Settings
+    {
+        public List<string> FreeAdapters = new List<string>();
+        public double PaidThresholdKBps = 5;
+
+        static string PathOf { get { return Path.Combine(Store.Dir, "NetMonitor.settings.json"); } }
+
+        public static Settings Load()
+        {
+            Settings s = new Settings();
+            s.FreeAdapters.Add("Wi-Fi 4");
+            try
+            {
+                if (!File.Exists(PathOf))
+                {
+                    // 처음 실행하면 기본값 파일을 만들어 수정할 수 있게 함
+                    Dictionary<string, object> def = new Dictionary<string, object>();
+                    def["FreeAdapters"] = s.FreeAdapters;
+                    def["PaidThresholdKBps"] = s.PaidThresholdKBps;
+                    File.WriteAllText(PathOf, new JavaScriptSerializer().Serialize(def));
+                    return s;
+                }
+                Dictionary<string, object> d = new JavaScriptSerializer()
+                    .DeserializeObject(File.ReadAllText(PathOf)) as Dictionary<string, object>;
+                if (d == null) return s;
+                object[] arr = d.ContainsKey("FreeAdapters") ? d["FreeAdapters"] as object[] : null;
+                if (arr != null)
+                {
+                    s.FreeAdapters.Clear();
+                    foreach (object o in arr) s.FreeAdapters.Add(Convert.ToString(o));
+                }
+                if (d.ContainsKey("PaidThresholdKBps")) s.PaidThresholdKBps = Convert.ToDouble(d["PaidThresholdKBps"]);
+            }
+            catch { }
+            return s;
+        }
+
+        // 어댑터 이름이 같거나 장치 설명에 목록 항목이 포함되면 무료로 간주
+        public bool IsFree(Series s)
+        {
+            foreach (string f in FreeAdapters)
+            {
+                if (string.Equals(s.Name, f, StringComparison.OrdinalIgnoreCase)) return true;
+                if (s.Description != null && s.Description.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
         }
     }
 
