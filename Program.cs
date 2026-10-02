@@ -29,12 +29,12 @@ namespace NetMonitor
         volatile string ruleBadText = "";
         volatile bool checking;
 
-        public TrayApp(bool startHidden)
+        public TrayApp(bool startHidden, bool demo)
         {
             icons[(int)State.Ok] = MakeIcon(Color.FromArgb(46, 160, 67));
             icons[(int)State.RuleBad] = MakeIcon(Color.FromArgb(235, 170, 0));
             icons[(int)State.Paid] = MakeIcon(Color.FromArgb(214, 39, 40));
-            form = new MainForm(monitor);
+            form = new MainForm(monitor, settings, demo);
             form.Icon = icons[(int)State.Ok];
             IntPtr unused = form.Handle;      // 창을 띄우기 전에도 BeginInvoke가 되도록 핸들 생성
 
@@ -205,18 +205,21 @@ namespace NetMonitor
         [STAThread]
         static void Main(string[] args)
         {
-            bool tray = false;
+            bool tray = false, demo = false;
             foreach (string a in args)
+            {
                 if (a.Equals("--tray", StringComparison.OrdinalIgnoreCase) || a.Equals("-Tray", StringComparison.OrdinalIgnoreCase)) tray = true;
+                if (a.Equals("--demo", StringComparison.OrdinalIgnoreCase)) demo = true;     // README 스크린샷용
+            }
 
-            // 중복 실행 방지
+            // 중복 실행 방지 (데모 모드는 실행 중인 본 앱과 따로 뜰 수 있게 다른 이름 사용)
             bool created;
-            using (Mutex mutex = new Mutex(true, @"Local\NetMonitor.Tim", out created))
+            using (Mutex mutex = new Mutex(true, demo ? @"Local\NetMonitor.Tim.Demo" : @"Local\NetMonitor.Tim", out created))
             {
                 if (!created) return;
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new TrayApp(tray));
+                Application.Run(new TrayApp(tray, demo));
             }
         }
     }

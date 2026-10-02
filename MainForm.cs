@@ -171,8 +171,11 @@ namespace NetMonitor
     public class MainForm : Form
     {
         readonly ThroughputMonitor mon;
+        readonly Settings settings;
+        readonly bool demo;      // --demo: 스크린샷용 가짜 연결/규칙 표시, 개인 정보(MAC) 가림, 설정 저장 안 함
         readonly TabControl tabs = new TabControl();
-        readonly TabPage tabConn = new TabPage("연결"), tabGraph = new TabPage("송수신 그래프"), tabRules = new TabPage("라우팅 규칙");
+        readonly TabPage tabConn = new TabPage("연결"), tabGraph = new TabPage("송수신 그래프"),
+            tabRules = new TabPage("라우팅 규칙"), tabSettings = new TabPage("설정");
 
         // 연결
         readonly DataGridView gridConn = NewGrid();
@@ -199,16 +202,16 @@ namespace NetMonitor
             statusLabel.Text = text; statusLabel.BackColor = color;
         }
 
-        public MainForm(ThroughputMonitor monitor)
+        public MainForm(ThroughputMonitor monitor, Settings cfg, bool demoMode)
         {
-            mon = monitor;
+            mon = monitor; settings = cfg; demo = demoMode;
             graph = new GraphPanel(mon);
             Text = "NetMonitor"; Size = new Size(960, 600); StartPosition = FormStartPosition.CenterScreen;
             Font = SystemFonts.MessageBoxFont;
 
-            BuildConnTab(); BuildGraphTab(); BuildRulesTab();
+            BuildConnTab(); BuildGraphTab(); BuildRulesTab(); BuildSettingsTab();
             tabs.Dock = DockStyle.Fill;
-            tabs.TabPages.AddRange(new TabPage[] { tabConn, tabGraph, tabRules });
+            tabs.TabPages.AddRange(new TabPage[] { tabConn, tabGraph, tabRules, tabSettings });
             Controls.Add(tabs);
 
             // 하단 상태 표시줄: 트레이 아이콘과 같은 신호등 상태를 보여줌
@@ -224,6 +227,7 @@ namespace NetMonitor
             {
                 if (tabs.SelectedTab == tabConn) RefreshConnections();
                 else if (tabs.SelectedTab == tabRules) RefreshRules();
+                else if (tabs.SelectedTab == tabSettings) RefreshSettingsList();
             };
             VisibleChanged += delegate { if (Visible) { RefreshConnections(); RefreshThroughput(); } };
         }
@@ -268,6 +272,7 @@ namespace NetMonitor
 
         public void RefreshConnections()
         {
+            if (demo) { ShowDemoConnections(); return; }
             Dictionary<string, string> ipMap = new Dictionary<string, string>();
             foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
                 foreach (UnicastIPAddressInformation u in n.GetIPProperties().UnicastAddresses)
@@ -341,6 +346,131 @@ namespace NetMonitor
             if (tabs.SelectedTab == tabGraph) graph.Invalidate();
         }
 
+        // ── 설정 탭: 무료/유료 어댑터 ──
+        readonly ListView lvAdapters = new ListView();
+        readonly NumericUpDown numThreshold = new NumericUpDown();
+        readonly Label lblSaved = new Label();
+        bool loadingList;
+
+        void BuildSettingsTab()
+        {
+            Label help = new Label
+            {
+                Dock = DockStyle.Top, Height = 48, Padding = new Padding(6, 6, 6, 0),
+                Text = "체크한 어댑터 = 무료, 체크하지 않은 어댑터 = 유료입니다. 어댑터 이름(Wi-Fi 2, 3, 4...)은 바뀔 수 있어서 " +
+                       "MAC 주소로 같은 장치를 찾습니다. 유료 어댑터로 임계 속도 이상 통신하면 트레이 아이콘이 빨갛게 바뀝니다."
+            };
+            lvAdapters.Dock = DockStyle.Fill; lvAdapters.View = View.Details;
+            lvAdapters.CheckBoxes = true; lvAdapters.FullRowSelect = true;
+            lvAdapters.Columns.Add("이름", 130); lvAdapters.Columns.Add("장치 설명", 300); lvAdapters.Columns.Add("MAC", 150);
+            lvAdapters.Columns.Add("상태", 100); lvAdapters.Columns.Add("구분", 60);
+            lvAdapters.ItemChecked += delegate (object s, ItemCheckedEventArgs e)
+            {
+                if (!loadingList) e.Item.SubItems[4].Text = e.Item.Checked ? "무료" : "유료";
+            };
+
+            FlowLayoutPanel bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(6, 6, 0, 0) };
+            bottom.Controls.Add(new Label { Text = "유료 판정 임계 속도 (KB/s):", AutoSize = true, Margin = new Padding(0, 6, 4, 0) });
+            numThreshold.DecimalPlaces = 1; numThreshold.Minimum = 0; numThreshold.Maximum = 1000000;
+            numThreshold.Increment = 1; numThreshold.Width = 80;
+            bottom.Controls.Add(numThreshold);
+            Button save = new Button { Text = "저장", Width = 80, Height = 26 };
+            Button reload = new Button { Text = "되돌리기", Width = 80, Height = 26 };
+            save.Click += delegate { SaveSettings(); };
+            reload.Click += delegate { RefreshSettingsList(); lblSaved.Text = ""; };
+            lblSaved.AutoSize = true; lblSaved.Margin = new Padding(8, 6, 0, 0);
+            bottom.Controls.AddRange(new Control[] { save, reload, lblSaved });
+
+            tabSettings.Controls.Add(lvAdapters); tabSettings.Controls.Add(help); tabSettings.Controls.Add(bottom);
+        }
+
+        string MacDisplay(string mac)
+        {
+            // 데모(스크린샷) 모드에서는 개인 식별 정보인 MAC 앞부분을 가림
+            if (demo && mac != null && mac.Length >= 17) return "**-**-**-**-**-" + mac.Substring(15);
+            return mac;
+        }
+
+        void AddAdapterRow(string name, string desc, string mac, string status, bool free)
+        {
+            ListViewItem it = new ListViewItem(name);
+            it.SubItems.Add(desc); it.SubItems.Add(MacDisplay(mac)); it.SubItems.Add(status);
+            it.SubItems.Add(free ? "무료" : "유료");
+            it.Tag = new string[] { name, mac, desc };
+            if (status != "연결됨") it.ForeColor = SystemColors.GrayText;
+            it.Checked = free;
+            lvAdapters.Items.Add(it);
+        }
+
+        public void RefreshSettingsList()
+        {
+            loadingList = true; lvAdapters.BeginUpdate(); lvAdapters.Items.Clear();
+            List<FreeEntry> unmatched = new List<FreeEntry>(settings.FreeAdapters);
+            foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (n.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                    n.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                string mac = Store.MacOf(n), name = n.Name, desc = n.Description;
+                unmatched.RemoveAll(delegate (FreeEntry e) { return e.Matches(name, mac, desc); });
+                AddAdapterRow(name, desc, mac, n.OperationalStatus == OperationalStatus.Up ? "연결됨" : "끊김",
+                    settings.IsFree(name, mac, desc));
+            }
+            // 지금은 없지만 무료로 저장해 둔 어댑터(USB 동글을 뽑아둔 경우 등)도 목록에 유지
+            foreach (FreeEntry e in unmatched) AddAdapterRow(e.Name, e.Description, e.Mac, "없음(저장됨)", true);
+            numThreshold.Value = (decimal)Math.Min(settings.PaidThresholdKBps, 1000000);
+            lvAdapters.EndUpdate(); loadingList = false;
+        }
+
+        void SaveSettings()
+        {
+            List<FreeEntry> list = new List<FreeEntry>();
+            foreach (ListViewItem it in lvAdapters.Items)
+            {
+                if (!it.Checked) continue;
+                string[] t = (string[])it.Tag;
+                FreeEntry e = new FreeEntry(); e.Name = t[0]; e.Mac = t[1]; e.Description = t[2];
+                list.Add(e);
+            }
+            settings.FreeAdapters = list;                         // TrayApp과 같은 객체라 바로 적용됨
+            settings.PaidThresholdKBps = (double)numThreshold.Value;
+            if (!demo) settings.Save();
+            lblSaved.Text = "저장됨 (" + DateTime.Now.ToString("HH:mm:ss") + ") - 바로 적용됩니다";
+        }
+
+        // ── 데모 데이터 (--demo, README 스크린샷용. 문서용 예약 IP 사용) ──
+        void ShowDemoConnections()
+        {
+            object[][] rows = {
+                new object[] { "chrome", 4120, "172.16.12.20:51324", "198.51.100.10:443", "Established", "Wi-Fi 4", null },
+                new object[] { "chrome", 4120, "172.16.12.20:51330", "198.51.100.24:443", "Established", "Wi-Fi 4", null },
+                new object[] { "Teams", 8844, "172.16.12.20:51402", "203.0.113.5:443", "Established", "Wi-Fi 4", null },
+                new object[] { "OneDrive", 6012, "172.16.12.20:51477", "198.51.100.88:443", "Established", "Wi-Fi 4", null },
+                new object[] { "code", 7320, "172.16.12.20:51520", "203.0.113.41:443", "Established", "Wi-Fi 4", null },
+                new object[] { "ssh", 9210, "192.168.0.20:52011", "203.0.113.10:22", "Established", "Wi-Fi", "files.example.com" },
+                new object[] { "rsync", 9288, "192.168.0.20:52140", "203.0.113.10:873", "Established", "Wi-Fi", "files.example.com" },
+            };
+            gridConn.Rows.Clear();
+            foreach (object[] r in rows) gridConn.Rows.Add(r);
+            lblCount.Text = "연결 " + rows.Length + "개";
+        }
+
+        void ShowDemoRules()
+        {
+            gridRules.Rows.Clear();
+            object[][] rows = {
+                new object[] { "files.example.com", "203.0.113.10", "Wi-Fi > 이더넷", 1, "Wi-Fi (정상)" },
+                new object[] { "api.example.org", "203.0.113.25", "Wi-Fi > 이더넷", 1, "Wi-Fi (정상)" },
+                new object[] { "cdn.example.net", "198.51.100.77", "Wi-Fi", 1, "Wi-Fi 4 (불일치)" },
+            };
+            foreach (object[] r in rows)
+            {
+                int i = gridRules.Rows.Add(r);
+                bool ok = ((string)r[4]).EndsWith("(정상)");
+                gridRules.Rows[i].Cells[4].Style.ForeColor = ok ? Color.ForestGreen : Color.Firebrick;
+            }
+            lblInfo.Text = "기본 인터페이스 고정: Wi-Fi 4\r\n자동 동기화: 설치됨 · 마지막 동기화 방금 전";
+        }
+
         // ── 라우팅 규칙 탭 ──
         void BuildRulesTab()
         {
@@ -375,6 +505,7 @@ namespace NetMonitor
         // DNS/라우트 조회는 느릴 수 있어 백그라운드에서 수행. 시작 시에도 한 번 불러 '적용 규칙' 열을 채움.
         public void RefreshRules()
         {
+            if (demo) { ShowDemoRules(); return; }
             ThreadPool.QueueUserWorkItem(delegate
             {
                 List<Rule> rules = Store.LoadRulesWithStatus();

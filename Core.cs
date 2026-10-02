@@ -248,6 +248,17 @@ namespace NetMonitor
             return "설치 안 됨" + when;
         }
 
+        // MAC 주소를 AA-BB-CC-DD-EE-FF 형식으로 (없으면 빈 문자열)
+        public static string MacOf(NetworkInterface nic)
+        {
+            try
+            {
+                byte[] b = nic.GetPhysicalAddress().GetAddressBytes();
+                return b.Length == 0 ? "" : BitConverter.ToString(b);
+            }
+            catch { return ""; }
+        }
+
         public static string FormatRate(double bps)
         {
             if (bps >= 1048576) return (bps / 1048576).ToString("N1") + " MB/s";
@@ -257,9 +268,25 @@ namespace NetMonitor
     }
 
     // ── 설정: 무료 어댑터 / 유료 판정 임계 속도 (NetMonitor.settings.json) ──
+    // 무료로 지정한 어댑터. 이름(Wi-Fi 2/3/4...)은 재연결 때 바뀔 수 있어서 MAC과 장치 설명도 함께 기억한다.
+    public class FreeEntry
+    {
+        public string Name = "", Mac = "", Description = "";
+
+        // MAC이 있으면 MAC으로 우선 판단(가장 안정적). 없으면 이름 일치 또는 설명 일부 포함으로 판단.
+        public bool Matches(string name, string mac, string description)
+        {
+            if (!string.IsNullOrEmpty(Mac) && !string.IsNullOrEmpty(mac))
+                return string.Equals(Mac, mac, StringComparison.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(Name) && string.Equals(Name, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return !string.IsNullOrEmpty(Description) && description != null &&
+                   description.IndexOf(Description, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
     public class Settings
     {
-        public List<string> FreeAdapters = new List<string>();
+        public List<FreeEntry> FreeAdapters = new List<FreeEntry>();
         public double PaidThresholdKBps = 5;
 
         static string PathOf { get { return Path.Combine(Store.Dir, "NetMonitor.settings.json"); } }
@@ -267,18 +294,11 @@ namespace NetMonitor
         public static Settings Load()
         {
             Settings s = new Settings();
-            s.FreeAdapters.Add("Wi-Fi 4");
+            FreeEntry def = new FreeEntry(); def.Name = "Wi-Fi 4";
+            s.FreeAdapters.Add(def);
             try
             {
-                if (!File.Exists(PathOf))
-                {
-                    // 처음 실행하면 기본값 파일을 만들어 수정할 수 있게 함
-                    Dictionary<string, object> def = new Dictionary<string, object>();
-                    def["FreeAdapters"] = s.FreeAdapters;
-                    def["PaidThresholdKBps"] = s.PaidThresholdKBps;
-                    File.WriteAllText(PathOf, new JavaScriptSerializer().Serialize(def));
-                    return s;
-                }
+                if (!File.Exists(PathOf)) { s.Save(); return s; }   // 처음 실행하면 기본값 파일 생성
                 Dictionary<string, object> d = new JavaScriptSerializer()
                     .DeserializeObject(File.ReadAllText(PathOf)) as Dictionary<string, object>;
                 if (d == null) return s;
@@ -286,7 +306,19 @@ namespace NetMonitor
                 if (arr != null)
                 {
                     s.FreeAdapters.Clear();
-                    foreach (object o in arr) s.FreeAdapters.Add(Convert.ToString(o));
+                    foreach (object o in arr)
+                    {
+                        FreeEntry e = new FreeEntry();
+                        Dictionary<string, object> eo = o as Dictionary<string, object>;
+                        if (eo != null)    // 객체 형식: {"Name":..,"Mac":..,"Description":..}
+                        {
+                            if (eo.ContainsKey("Name")) e.Name = Convert.ToString(eo["Name"]);
+                            if (eo.ContainsKey("Mac")) e.Mac = Convert.ToString(eo["Mac"]);
+                            if (eo.ContainsKey("Description")) e.Description = Convert.ToString(eo["Description"]);
+                        }
+                        else { e.Name = Convert.ToString(o); e.Description = e.Name; }   // 예전 문자열 형식
+                        s.FreeAdapters.Add(e);
+                    }
                 }
                 if (d.ContainsKey("PaidThresholdKBps")) s.PaidThresholdKBps = Convert.ToDouble(d["PaidThresholdKBps"]);
             }
@@ -294,22 +326,37 @@ namespace NetMonitor
             return s;
         }
 
-        // 어댑터 이름이 같거나 장치 설명에 목록 항목이 포함되면 무료로 간주
-        public bool IsFree(Series s)
+        public void Save()
         {
-            foreach (string f in FreeAdapters)
+            try
             {
-                if (string.Equals(s.Name, f, StringComparison.OrdinalIgnoreCase)) return true;
-                if (s.Description != null && s.Description.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                List<object> list = new List<object>();
+                foreach (FreeEntry e in FreeAdapters)
+                {
+                    Dictionary<string, object> eo = new Dictionary<string, object>();
+                    eo["Name"] = e.Name; eo["Mac"] = e.Mac; eo["Description"] = e.Description;
+                    list.Add(eo);
+                }
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["FreeAdapters"] = list; d["PaidThresholdKBps"] = PaidThresholdKBps;
+                File.WriteAllText(PathOf, new JavaScriptSerializer().Serialize(d));
             }
+            catch { }
+        }
+
+        public bool IsFree(string name, string mac, string description)
+        {
+            foreach (FreeEntry e in FreeAdapters) if (e.Matches(name, mac, description)) return true;
             return false;
         }
+
+        public bool IsFree(Series s) { return IsFree(s.Name, s.Mac, s.Description); }
     }
 
     // ── 어댑터별 송수신 속도 샘플러 ─────────────────────────────
     public class Series
     {
-        public string Name, Description;
+        public string Name, Description, Mac = "";
         public List<double> Rx = new List<double>(), Tx = new List<double>();
         public long LastRx, LastTx, TotalRx, TotalTx;
         public bool Active, WasUp;
@@ -350,6 +397,7 @@ namespace NetMonitor
                     Items[nic.Name] = s;
                 }
                 s.Description = nic.Description; s.Active = true;
+                s.Mac = Store.MacOf(nic);
                 // 처음 보이거나 재연결된 직후에는 기준점만 잡고 0으로 기록 (누적 카운터 전체가 속도로 튀는 것 방지)
                 double rx = 0, tx = 0;
                 if (s.WasUp)
