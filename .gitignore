@@ -8,3 +8,4 @@ bin/
 obj/
 NetMonitor.settings.json
 dist/
+WifiRoute.state.json

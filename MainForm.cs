@@ -167,7 +167,187 @@ namespace NetMonitor
         }
     }
 
-    // ── 메인 창 ─────────────────────────────────────────────────
+    // ── 규칙 추가 창: 목적지 입력 → (DNS 서버를 골라) IP 조회 → 어댑터 선택 ─────────
+    public class AddRuleDialog : Form
+    {
+        readonly TextBox tbTarget = new TextBox();
+        readonly ComboBox cmbDns = new ComboBox();
+        readonly Button btnLookup = new Button();
+        readonly CheckedListBox clbIps = new CheckedListBox();
+        readonly Label lblLookup = new Label();
+        readonly RadioButton rbDomain = new RadioButton(), rbIps = new RadioButton();
+        readonly CheckedListBox clb = new CheckedListBox();
+        readonly NumericUpDown num = new NumericUpDown();
+
+        public List<string> SelectedIps = new List<string>();
+        public List<string> Interfaces = new List<string>();
+        public string Target { get { return tbTarget.Text.Trim(); } }
+        public int Metric { get { return (int)num.Value; } }
+        bool IsIp { get { IPAddress a; return IPAddress.TryParse(Target, out a); } }
+
+        // 비우면 시스템 기본 DNS. "8.8.8.8 (Google)" 같은 표시에서 주소만 꺼낸다.
+        public string DnsServer
+        {
+            get
+            {
+                string t = cmbDns.Text.Trim();
+                if (IsIp || t.Length == 0 || t.StartsWith("시스템")) return "";
+                return t.Split(' ')[0];
+            }
+        }
+
+        // true: 조회된 IP를 하나하나 고정 규칙으로 저장 / false: 도메인 규칙으로 저장(동기화 때마다 재조회)
+        public bool SaveAsIps { get { return !IsIp && rbIps.Checked; } }
+
+        public AddRuleDialog()
+        {
+            Text = "규칙 추가 (목적지 → 어댑터)"; StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+            ShowInTaskbar = false; Font = SystemFonts.MessageBoxFont;
+
+            Controls.Add(new Label { Text = "목적지 (도메인 또는 IP)", Left = 12, Top = 12, AutoSize = true });
+            tbTarget.SetBounds(12, 32, 300, 24);
+            btnLookup.Text = "IP 조회"; btnLookup.SetBounds(320, 31, 72, 26);
+            Controls.Add(tbTarget); Controls.Add(btnLookup);
+
+            Controls.Add(new Label { Text = "조회에 쓸 DNS 서버 (직접 입력 가능)", Left = 12, Top = 66, AutoSize = true });
+            cmbDns.SetBounds(12, 86, 220, 24);
+            cmbDns.Items.AddRange(new object[] { "시스템 기본", "8.8.8.8 (Google)", "1.1.1.1 (Cloudflare)", "9.9.9.9 (Quad9)", "168.126.63.1 (KT)" });
+            cmbDns.SelectedIndex = 0;
+            Controls.Add(cmbDns);
+
+            Controls.Add(new Label { Text = "조회된 IP (체크한 것이 대상)", Left = 12, Top = 122, AutoSize = true });
+            clbIps.SetBounds(12, 142, 380, 88); clbIps.CheckOnClick = true;
+            Controls.Add(clbIps);
+            lblLookup.SetBounds(12, 234, 380, 34); lblLookup.ForeColor = SystemColors.GrayText;
+            lblLookup.Text = "도메인을 입력하고 'IP 조회'를 누르면 이 DNS 서버가 돌려주는 IP를 전부 보여줍니다.";
+            Controls.Add(lblLookup);
+
+            Controls.Add(new Label { Text = "저장 방식", Left = 12, Top = 272, AutoSize = true });
+            rbDomain.SetBounds(12, 292, 380, 40); rbDomain.Checked = true;
+            rbDomain.Text = "도메인 규칙으로 저장 (권장) — 동기화할 때마다 이 DNS로 다시 조회해서 새 IP는 추가하고 사라진 IP는 제거합니다";
+            rbIps.SetBounds(12, 334, 380, 40);
+            rbIps.Text = "체크한 IP를 고정 규칙으로 저장 — 목록이 바뀌지 않습니다 (서비스가 IP를 바꾸면 직접 고쳐야 함)";
+            Controls.Add(rbDomain); Controls.Add(rbIps);
+
+            Controls.Add(new Label { Text = "어댑터 체크 (위쪽이 우선순위 높음, 비활성이어도 예비로 가능)", Left = 12, Top = 382, AutoSize = true });
+            clb.SetBounds(12, 404, 340, 120); clb.CheckOnClick = true;
+            foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (n.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                clb.Items.Add(n.Name + "  [" + n.OperationalStatus + "]");
+            }
+            Controls.Add(clb);
+            Button up = new Button { Text = "▲", Left = 358, Top = 404, Width = 34, Height = 28 };
+            Button dn = new Button { Text = "▼", Left = 358, Top = 436, Width = 34, Height = 28 };
+            up.Click += delegate { MoveItem(-1); }; dn.Click += delegate { MoveItem(1); };
+            Controls.Add(up); Controls.Add(dn);
+
+            Controls.Add(new Label { Text = "메트릭", Left = 12, Top = 534, AutoSize = true });
+            num.Minimum = 1; num.Maximum = 9999; num.Value = 1; num.SetBounds(70, 531, 70, 24);
+            Controls.Add(num);
+
+            Button ok = new Button { Text = "확인", Left = 222, Top = 566, DialogResult = DialogResult.OK };
+            Button cancel = new Button { Text = "취소", Left = 312, Top = 566, DialogResult = DialogResult.Cancel };
+            Controls.Add(ok); Controls.Add(cancel);
+            AcceptButton = ok; CancelButton = cancel;
+            ClientSize = new Size(410, 606);
+
+            btnLookup.Click += delegate { DoLookup(); };
+            tbTarget.KeyDown += delegate (object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoLookup(); }   // 엔터는 조회 (창이 닫히지 않게)
+            };
+            tbTarget.TextChanged += delegate { UpdateState(); };
+            UpdateState();
+        }
+
+        // IP를 직접 입력하면 조회/DNS/저장 방식은 의미가 없으므로 끈다
+        void UpdateState()
+        {
+            bool ip = IsIp;
+            btnLookup.Enabled = !ip && Target.Length > 0;
+            cmbDns.Enabled = !ip; rbDomain.Enabled = !ip; rbIps.Enabled = !ip; clbIps.Enabled = !ip;
+            if (ip) { clbIps.Items.Clear(); lblLookup.ForeColor = SystemColors.GrayText; lblLookup.Text = "IP 주소는 조회 없이 그대로 규칙으로 추가됩니다."; }
+        }
+
+        void DoLookup()
+        {
+            string host = Target, srv = DnsServer;
+            if (host.Length == 0 || IsIp) return;
+            btnLookup.Enabled = false; lblLookup.ForeColor = SystemColors.GrayText; lblLookup.Text = "조회 중...";
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Stopwatch sw = Stopwatch.StartNew();
+                string err;
+                List<IPAddress> ips = DnsLookup.Resolve(host, srv, out err);
+                sw.Stop();
+                long ms = sw.ElapsedMilliseconds;
+                try { BeginInvoke((MethodInvoker)delegate { ShowLookup(ips, srv, err, ms); }); }
+                catch (InvalidOperationException) { }     // 창이 이미 닫힘
+            });
+        }
+
+        void ShowLookup(List<IPAddress> ips, string srv, string err, long ms)
+        {
+            clbIps.Items.Clear();
+            foreach (IPAddress ip in ips) clbIps.Items.Add(ip.ToString(), true);
+            string via = srv.Length == 0 ? "시스템 DNS" : srv;
+            if (ips.Count > 0)
+            {
+                lblLookup.ForeColor = Color.ForestGreen;
+                lblLookup.Text = ips.Count + "개 IP · " + via + " · " + ms + "ms" + (err != null ? " · " + err : "");
+            }
+            else
+            {
+                lblLookup.ForeColor = Color.Firebrick;
+                lblLookup.Text = (err ?? "조회 결과가 없습니다") + " (" + via + ")";
+            }
+            btnLookup.Enabled = !IsIp && Target.Length > 0;
+        }
+
+        void MoveItem(int dir)
+        {
+            int i = clb.SelectedIndex, j = i + dir;
+            if (i < 0 || j < 0 || j >= clb.Items.Count) return;
+            object ti = clb.Items[i], tj = clb.Items[j];
+            bool ci = clb.GetItemChecked(i), cj = clb.GetItemChecked(j);
+            clb.Items[i] = tj; clb.SetItemChecked(i, cj);
+            clb.Items[j] = ti; clb.SetItemChecked(j, ci);
+            clb.SelectedIndex = j;
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (DialogResult == DialogResult.OK)
+            {
+                Interfaces.Clear();
+                foreach (int i in clb.CheckedIndices)
+                {
+                    string s = clb.Items[i].ToString();
+                    Interfaces.Add(s.Substring(0, s.LastIndexOf("  [", StringComparison.Ordinal)));
+                }
+                if (Target.Length == 0 || Interfaces.Count == 0)
+                {
+                    MessageBox.Show(this, "목적지를 입력하고 어댑터를 하나 이상 선택하세요.");
+                    e.Cancel = true; return;
+                }
+                SelectedIps.Clear();
+                if (SaveAsIps)
+                {
+                    foreach (int i in clbIps.CheckedIndices) SelectedIps.Add(clbIps.Items[i].ToString());
+                    if (SelectedIps.Count == 0)
+                    {
+                        MessageBox.Show(this, "고정 규칙으로 저장할 IP가 없습니다. 먼저 'IP 조회'를 누르고 대상 IP를 체크하세요.");
+                        e.Cancel = true; return;
+                    }
+                }
+            }
+            base.OnFormClosing(e);
+        }
+    }
+
+    // ── 메인 창─────────────────────────────────────────────────
     public class MainForm : Form
     {
         readonly ThroughputMonitor mon;
@@ -465,15 +645,15 @@ namespace NetMonitor
         {
             gridRules.Rows.Clear();
             object[][] rows = {
-                new object[] { "files.example.com", "203.0.113.10", "Wi-Fi > 이더넷", 1, "Wi-Fi (정상)" },
-                new object[] { "api.example.org", "203.0.113.25", "Wi-Fi > 이더넷", 1, "Wi-Fi (정상)" },
-                new object[] { "cdn.example.net", "198.51.100.77", "Wi-Fi", 1, "Wi-Fi 4 (불일치)" },
+                new object[] { "files.example.com", "203.0.113.10", "Wi-Fi > 이더넷", 1, "-", "Wi-Fi (정상)" },
+                new object[] { "app.example.org", "203.0.113.25 외 3개", "Wi-Fi", 1, "8.8.8.8", "Wi-Fi (정상) · IP 4개" },
+                new object[] { "cdn.example.net", "198.51.100.77", "Wi-Fi", 1, "1.1.1.1", "Wi-Fi 4 (불일치)" },
             };
             foreach (object[] r in rows)
             {
                 int i = gridRules.Rows.Add(r);
-                bool ok = ((string)r[4]).EndsWith("(정상)");
-                gridRules.Rows[i].Cells[4].Style.ForeColor = ok ? Color.ForestGreen : Color.Firebrick;
+                bool ok = ((string)r[5]).Contains("(정상)");
+                gridRules.Rows[i].Cells[5].Style.ForeColor = ok ? Color.ForestGreen : Color.Firebrick;
             }
             lblInfo.Text = "기본 인터페이스 고정: Wi-Fi 4\r\n자동 동기화: 설치됨 · 마지막 동기화 방금 전";
         }
@@ -491,7 +671,8 @@ namespace NetMonitor
             AddBtn(top, "자동 동기화 설치", 120, delegate { RunTool("-InstallTask"); });
             AddBtn(top, "제거", 60, delegate { RunTool("-UninstallTask"); });
 
-            foreach (string c in new string[] { "목적지", "IP", "인터페이스(우선순위)", "메트릭", "실제 경로" }) gridRules.Columns.Add(c, c);
+            foreach (string c in new string[] { "목적지", "IP", "인터페이스(우선순위)", "메트릭", "DNS", "실제 경로" }) gridRules.Columns.Add(c, c);
+            gridRules.Columns[4].FillWeight = 55;
             gridRules.Columns[3].FillWeight = 40;
             lblInfo.Dock = DockStyle.Bottom; lblInfo.Height = 48; lblInfo.Padding = new Padding(6, 6, 0, 0);
             tabRules.Controls.Add(gridRules); tabRules.Controls.Add(top); tabRules.Controls.Add(lblInfo);
@@ -526,9 +707,10 @@ namespace NetMonitor
                         Dictionary<string, string> map = new Dictionary<string, string>();
                         foreach (Rule r in rules)
                         {
-                            int i = gridRules.Rows.Add(r.Target, r.Ip, string.Join(" > ", r.Aliases.ToArray()), r.Metric, r.Actual);
-                            gridRules.Rows[i].Cells[4].Style.ForeColor = r.Ok ? Color.ForestGreen : Color.Firebrick;
-                            if (r.Ip != null) map[r.Ip] = r.Target;
+                            int i = gridRules.Rows.Add(r.Target, r.Ip, string.Join(" > ", r.Aliases.ToArray()), r.Metric,
+                                r.Dns.Length > 0 ? r.Dns : "-", r.Actual);
+                            gridRules.Rows[i].Cells[5].Style.ForeColor = r.Ok ? Color.ForestGreen : Color.Firebrick;
+                            foreach (string ip in r.Ips) map[ip] = r.Target;     // 연결 탭 '적용 규칙' 열용
                         }
                         ruleByIp = map;
                         lblInfo.Text = (def != null ? "기본 인터페이스 고정: " + def : "기본 인터페이스 고정: 없음 (Windows 자동)")
@@ -553,11 +735,16 @@ namespace NetMonitor
 
         void OnAdd(object s, EventArgs e)
         {
-            using (RuleDialog d = new RuleDialog("규칙 추가 (목적지 → 인터페이스)", false, false))
+            using (AddRuleDialog d = new AddRuleDialog())
             {
                 if (d.ShowDialog(this) != DialogResult.OK) return;
-                RunTool("-AddTarget \"" + d.Target + "\" -Interface \"" + string.Join(",", d.Interfaces.ToArray()) +
-                        "\" -Metric " + d.Metric);
+                // 고정 IP 모드: 체크한 IP들을 쉼표로 묶어 한 번에(관리자 권한 확인 1회) 추가
+                // 도메인 모드: 도메인 하나를 추가하고, 지정한 DNS 서버는 규칙에 저장되어 동기화 때마다 쓰인다
+                string target = d.SaveAsIps ? string.Join(",", d.SelectedIps.ToArray()) : d.Target;
+                string args = "-AddTarget \"" + target + "\" -Interface \"" + string.Join(",", d.Interfaces.ToArray()) +
+                              "\" -Metric " + d.Metric;
+                if (!d.SaveAsIps && d.DnsServer.Length > 0) args += " -Dns \"" + d.DnsServer + "\"";
+                RunTool(args);
             }
         }
 

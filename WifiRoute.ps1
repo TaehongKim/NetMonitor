@@ -9,6 +9,9 @@
     - -Sync 로 실행하면 메뉴 없이 규칙을 조용히 동기화합니다 (작업 스케줄러용).
     - -AddTarget/-Interface/-Metric, -RemoveTarget, -InstallTask, -UninstallTask,
       -Status, -SetDefault, -ClearDefault 파라미터로 메뉴 없이 스크립트로도 조작할 수 있습니다.
+    - -AddTarget 은 쉼표로 여러 개를 한 번에 줄 수 있고(관리자 확인 1회), -Dns "8.8.8.8" 로 조회에 쓸
+      DNS 서버를 지정합니다. 도메인 규칙은 기본적으로 A 레코드 "전체"를 라우트로 만들고, 동기화할 때마다
+      다시 조회해서 새 IP는 추가, 사라진 IP는 제거합니다 (-FirstOnly 면 첫 번째 IP만).
     - -SetDefault "인터페이스이름" : 그 인터페이스를 시스템 "기본 경로"로 강제 고정
       (인터페이스 메트릭을 낮춰서 동기화 때마다 재적용). 목적지별 규칙과 반대로,
       "이건 기본으로, 특정 목적지만 다른 인터페이스로" 구성을 만들 때 사용.
@@ -24,13 +27,16 @@ param(
     [int]$Metric = 1,
     [string]$RemoveTarget,
     [string]$SetDefault,
-    [switch]$ClearDefault
+    [switch]$ClearDefault,
+    [string]$Dns,
+    [switch]$FirstOnly
 )
 
 $ScriptDir   = Split-Path -Parent $PSCommandPath
 $ConfigPath  = Join-Path $ScriptDir 'WifiRoute.config.json'
 $DefaultPath = Join-Path $ScriptDir 'WifiRoute.default.json'
 $LogPath     = Join-Path $ScriptDir 'WifiRoute.log'
+$StatePath   = Join-Path $ScriptDir 'WifiRoute.state.json'   # 규칙별로 마지막에 만든 IP 목록 (사라진 IP 정리용)
 $TaskName    = 'WifiRouteSync'
 
 # ── 관리자 권한 확인 및 자동 재실행 ─────────────────────────────
@@ -51,6 +57,8 @@ function Get-ReinvokeArgs {
     if ($RemoveTarget) { $parts += "-RemoveTarget `"$RemoveTarget`"" }
     if ($SetDefault) { $parts += "-SetDefault `"$SetDefault`"" }
     if ($ClearDefault) { $parts += '-ClearDefault' }
+    if ($Dns) { $parts += "-Dns `"$Dns`"" }
+    if ($FirstOnly) { $parts += '-FirstOnly' }
     return ($parts -join ' ')
 }
 
@@ -185,6 +193,74 @@ function Resolve-Target {
     }
 }
 
+# 지정한 DNS 서버(없으면 시스템 기본)로 A 레코드(IPv4)를 "모두" 조회한다. 실패하면 빈 배열.
+# 같은 도메인이 여러 IP를 순서만 바꿔 돌려주는 서비스(Notion 등)는 첫 번째 하나만 쓰면 나머지가 규칙 밖으로 나간다.
+function Resolve-TargetAll {
+    param([string]$Target, [string]$DnsServer)
+    if ($Target -as [ipaddress]) { return @($Target) }
+    try {
+        $p = @{ Name = $Target; Type = 'A'; ErrorAction = 'Stop' }
+        if ($DnsServer) { $p.Server = $DnsServer; $p.DnsOnly = $true }
+        $recs = @(Resolve-DnsName @p | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+        return @($recs | Select-Object -Unique)
+    }
+    catch { return @() }
+}
+
+# 규칙 항목의 선택 필드(Dns, AllRecords)는 예전 설정 파일에 없을 수 있다.
+function Get-EntryProp {
+    param($Entry, [string]$Name, $Default = $null)
+    $p = $Entry.PSObject.Properties[$Name]
+    if ($p -and $null -ne $p.Value -and "$($p.Value)" -ne '') { return $p.Value }
+    return $Default
+}
+
+# 규칙 하나가 라우트로 만들어야 할 IP 목록. IP 규칙이면 그 IP 하나, 도메인이면 DNS 조회 결과(기본: 전체, 최대 32개).
+function Get-EntryIps {
+    param($Entry)
+    if ($Entry.Target -as [ipaddress]) { return @([string]$Entry.Target) }
+    $ips = @(Resolve-TargetAll -Target $Entry.Target -DnsServer ([string](Get-EntryProp $Entry 'Dns' '')))
+    if ($ips.Count -eq 0) { return @() }
+    if (-not [bool](Get-EntryProp $Entry 'AllRecords' $true)) { return @($ips[0]) }
+    return @($ips | Select-Object -First 32)
+}
+
+# ── 규칙별 마지막 IP 목록(상태 파일): IP가 바뀐 서비스의 옛 라우트를 정리하기 위해 기억해 둔다 ──
+function Get-RouteState {
+    $h = @{}
+    if (Test-Path $StatePath) {
+        try {
+            $raw = Get-Content $StatePath -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                foreach ($p in ($raw | ConvertFrom-Json).PSObject.Properties) { $h[$p.Name] = @($p.Value) }
+            }
+        }
+        catch { }
+    }
+    return $h
+}
+
+function Save-RouteState {
+    param($State)
+    $o = [ordered]@{}
+    foreach ($k in $State.Keys) { $o[$k] = @($State[$k]) }
+    ConvertTo-Json -InputObject $o -Depth 3 | Set-Content -Path $StatePath -Encoding UTF8
+}
+
+# 다른 규칙이 쓰고 있는 IP 집합 (IP 규칙 + 다른 도메인 규칙의 기억된 IP). 이 IP의 라우트는 함부로 지우면 안 된다.
+function Get-IpsInUse {
+    param([string]$ExceptTarget)
+    $set = @{}
+    foreach ($e in @(Get-Config)) {
+        if ($e.Target -ne $ExceptTarget -and ($e.Target -as [ipaddress])) { $set[[string]$e.Target] = $true }
+    }
+    $st = Get-RouteState
+    foreach ($k in $st.Keys) {
+        if ($k -ne $ExceptTarget) { foreach ($i in $st[$k]) { $set[[string]$i] = $true } }
+    }
+    return $set
+}
+
 function Remove-ExistingRouteQuiet {
     param([string]$Prefix)
     # 활성 스토어 + 영구 스토어 양쪽에 남아있을 수 있는 동일 목적지 라우트를
@@ -208,9 +284,10 @@ function Remove-ExistingRouteQuiet {
 function Set-RouteForEntry {
     param($Entry)
 
-    $ip = Resolve-Target -Target $Entry.Target
-    if (-not $ip) {
-        Write-Log "실패: '$($Entry.Target)' DNS 확인 불가 (건너뜀)"
+    # DNS가 일시적으로 실패해도 기존 라우트는 그대로 둔다 (지우지 않고 건너뜀)
+    $ips = @(Get-EntryIps -Entry $Entry)
+    if ($ips.Count -eq 0) {
+        Write-Log "실패: '$($Entry.Target)' DNS 확인 불가 (건너뜀, 기존 라우트 유지)"
         return
     }
 
@@ -228,24 +305,45 @@ function Set-RouteForEntry {
         return
     }
 
-    $prefix = "$ip/32"
-    $existing = Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($existing -and $existing.InterfaceIndex -eq $ifc.InterfaceIndex -and $existing.NextHop -eq $ifc.Gateway) {
-        Write-Log "유지: $($Entry.Target) ($ip) -> $($ifc.InterfaceAlias) via $($ifc.Gateway) (변경 없음)"
-        return
+    $kept = 0
+    foreach ($ip in $ips) {
+        $prefix = "$ip/32"
+        $existing = Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existing -and $existing.InterfaceIndex -eq $ifc.InterfaceIndex -and $existing.NextHop -eq $ifc.Gateway) {
+            $kept++
+            continue
+        }
+
+        Remove-ExistingRouteQuiet -Prefix $prefix
+        $out = netsh interface ipv4 add route $prefix $ifc.InterfaceAlias $ifc.Gateway "metric=$($Entry.Metric)" store=persistent 2>&1
+
+        $verify = Get-NetRoute -PolicyStore PersistentStore -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
+            Where-Object { $_.InterfaceIndex -eq $ifc.InterfaceIndex -and $_.NextHop -eq $ifc.Gateway }
+        if ($verify) {
+            Write-Log "갱신: $($Entry.Target) ($ip) -> $($ifc.InterfaceAlias) via $($ifc.Gateway)"
+        }
+        else {
+            Write-Log "실패: $($Entry.Target) ($ip) -> $($ifc.InterfaceAlias) 라우트 추가 실패 (netsh 출력: $out)"
+        }
+    }
+    if ($kept -gt 0) {
+        $what = if ($ips.Count -eq 1) { $ips[0] } else { "$kept/$($ips.Count)개 IP" }
+        Write-Log "유지: $($Entry.Target) ($what) -> $($ifc.InterfaceAlias) via $($ifc.Gateway) (변경 없음)"
     }
 
-    Remove-ExistingRouteQuiet -Prefix $prefix
-    $out = netsh interface ipv4 add route $prefix $ifc.InterfaceAlias $ifc.Gateway "metric=$($Entry.Metric)" store=persistent 2>&1
-
-    $verify = Get-NetRoute -PolicyStore PersistentStore -DestinationPrefix $prefix -ErrorAction SilentlyContinue |
-        Where-Object { $_.InterfaceIndex -eq $ifc.InterfaceIndex -and $_.NextHop -eq $ifc.Gateway }
-    if ($verify) {
-        Write-Log "갱신: $($Entry.Target) ($ip) -> $($ifc.InterfaceAlias) via $($ifc.Gateway)"
+    # 지난번에 이 규칙으로 만들었는데 지금 DNS 결과에 없는 IP의 라우트는 정리한다(IP가 바뀌는 서비스 추적).
+    # 다른 규칙이 쓰는 IP는 지우지 않는다.
+    $state = Get-RouteState
+    $prev = @()
+    if ($state.ContainsKey($Entry.Target)) { $prev = @($state[$Entry.Target]) }
+    $inUse = Get-IpsInUse -ExceptTarget $Entry.Target
+    foreach ($old in $prev) {
+        if ($ips -contains $old -or $inUse.ContainsKey([string]$old)) { continue }
+        Remove-ExistingRouteQuiet -Prefix "$old/32"
+        Write-Log "정리: $($Entry.Target) 의 IP 목록에서 사라진 $old 라우트 제거"
     }
-    else {
-        Write-Log "실패: $($Entry.Target) ($ip) -> $($ifc.InterfaceAlias) 라우트 추가 실패 (netsh 출력: $out)"
-    }
+    $state[$Entry.Target] = @($ips)
+    Save-RouteState -State $state
 }
 
 function Sync-AllRoutes {
@@ -316,28 +414,28 @@ function Show-Status {
     }
     else {
         foreach ($e in $cfg) {
-            $ip = Resolve-Target -Target $e.Target
+            $ips = @(Get-EntryIps -Entry $e)
             $candidates = @($e.InterfaceAlias)
             $line = "  $($e.Target)"
-            if ($ip) { $line += " ($ip)" }
+            $d = Get-EntryProp $e 'Dns' ''
+            if ($d) { $line += " [DNS $d]" }
+            if ($ips.Count -gt 0 -and $ips.Count -le 4) { $line += " (" + ($ips -join ', ') + ")" }
+            elseif ($ips.Count -gt 4) { $line += " ($($ips.Count)개 IP)" }
             $line += " -> $($candidates -join ' / ') (metric $($e.Metric))"
 
-            if ($ip) {
-                $r = Get-NetRoute -DestinationPrefix "$ip/32" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($r) {
+            if ($ips.Count -gt 0) {
+                $bad = @(); $okAlias = $null
+                foreach ($ip in $ips) {
+                    $r = Get-NetRoute -DestinationPrefix "$ip/32" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if (-not $r) { $bad += "$ip 라우트 없음"; continue }
                     $alias = (Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue).Name
-                    if ($candidates -contains $alias) {
-                        $line += "  [정상, 현재 '$alias' 경유, 게이트웨이 $($r.NextHop)]"
-                        Write-Host $line -ForegroundColor Green
-                    }
-                    else {
-                        $line += "  [불일치! 실제 인터페이스: $alias]"
-                        Write-Host $line -ForegroundColor Red
-                    }
+                    if ($candidates -contains $alias) { $okAlias = $alias } else { $bad += "$ip -> $alias" }
+                }
+                if ($bad.Count -eq 0) {
+                    Write-Host "$line  [정상, 현재 '$okAlias' 경유, IP $($ips.Count)개]" -ForegroundColor Green
                 }
                 else {
-                    $line += "  [라우트 없음]"
-                    Write-Host $line -ForegroundColor Red
+                    Write-Host "$line  [문제 $($bad.Count)건: $($bad -join '; ')]" -ForegroundColor Red
                 }
             }
             else {
@@ -378,16 +476,18 @@ function Show-Status {
 }
 
 function Add-RouteEntry {
-    param([string]$TargetIn, [string]$InterfaceIn, [int]$MetricIn = 1)
+    param([string]$TargetIn, [string]$InterfaceIn, [int]$MetricIn = 1, [string]$DnsIn, [bool]$AllRecordsIn = $true)
 
     if (-not $TargetIn) {
         $TargetIn = Read-Host "`n라우팅할 목적지 (도메인 또는 IP)를 입력하세요"
     }
     if ([string]::IsNullOrWhiteSpace($TargetIn)) { Write-Host "입력이 없어 취소합니다." -ForegroundColor Red; return }
 
-    $ip = Resolve-Target -Target $TargetIn
-    if (-not $ip) { Write-Host "DNS 확인 실패: $TargetIn" -ForegroundColor Red; return }
-    Write-Host "목적지 IP: $ip"
+    $probe = [PSCustomObject]@{ Target = $TargetIn; Dns = $DnsIn; AllRecords = $AllRecordsIn }
+    $ips = @(Get-EntryIps -Entry $probe)
+    if ($ips.Count -eq 0) { Write-Host "DNS 확인 실패: $TargetIn" -ForegroundColor Red; return }
+    $dnsNote = if ($DnsIn) { " (DNS $DnsIn)" } else { '' }
+    Write-Host "목적지 IP$dnsNote : $($ips -join ', ')"
 
     # 여러 인터페이스 중 "먼저 연결되는 것" 우선순위 목록으로 등록할 수 있도록,
     # 지금 당장 활성 상태가 아닌 인터페이스도 고를 수 있게 전체 어댑터를 보여준다.
@@ -430,6 +530,11 @@ function Add-RouteEntry {
         InterfaceAlias = if ($chosenAliases.Count -eq 1) { $chosenAliases[0] } else { $chosenAliases }
         Metric         = $MetricIn
     }
+    # 도메인 규칙에만 DNS 서버/전체 조회 옵션을 저장 (IP 규칙에는 의미 없음)
+    if (-not ($TargetIn -as [ipaddress])) {
+        if ($DnsIn) { $entry | Add-Member -NotePropertyName Dns -NotePropertyValue $DnsIn }
+        $entry | Add-Member -NotePropertyName AllRecords -NotePropertyValue $AllRecordsIn
+    }
     Set-RouteForEntry -Entry $entry
 
     $cfg = @(Get-Config | Where-Object { $_.Target -ne $TargetIn })
@@ -462,8 +567,18 @@ function Remove-RouteEntry {
         $target = $cfg[[int]$sel]
     }
 
-    $ip = Resolve-Target -Target $target.Target
-    if ($ip) { Remove-ExistingRouteQuiet -Prefix "$ip/32" }
+    # 이 규칙으로 만든 모든 IP(기억해 둔 목록 + 지금 조회되는 IP)의 라우트를 제거한다.
+    # 다른 규칙이 쓰는 IP는 남겨 둔다.
+    $state = Get-RouteState
+    $toRemove = @()
+    if ($state.ContainsKey($target.Target)) { $toRemove += @($state[$target.Target]) }
+    $toRemove += @(Get-EntryIps -Entry $target)
+    $inUse = Get-IpsInUse -ExceptTarget $target.Target
+    foreach ($ip in ($toRemove | Select-Object -Unique)) {
+        if (-not $inUse.ContainsKey([string]$ip)) { Remove-ExistingRouteQuiet -Prefix "$ip/32" }
+    }
+    $state.Remove($target.Target)
+    Save-RouteState -State $state
 
     $newCfg = @($cfg | Where-Object { $_.Target -ne $target.Target })
     Save-Config -ConfigList $newCfg
@@ -481,7 +596,13 @@ if ($Sync) {
 if ($Status) { Show-Status; exit }
 if ($InstallTask) { Install-AutoSync; exit }
 if ($UninstallTask) { Uninstall-AutoSync; exit }
-if ($AddTarget) { Add-RouteEntry -TargetIn $AddTarget -InterfaceIn $Interface -MetricIn $Metric; exit }
+if ($AddTarget) {
+    # 쉼표로 여러 목적지를 한 번에 추가할 수 있다 (관리자 권한 확인 한 번으로 처리)
+    foreach ($t in @($AddTarget -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        Add-RouteEntry -TargetIn $t -InterfaceIn $Interface -MetricIn $Metric -DnsIn $Dns -AllRecordsIn (-not $FirstOnly)
+    }
+    exit
+}
 if ($RemoveTarget) { Remove-RouteEntry -TargetIn $RemoveTarget; exit }
 if ($SetDefault) {
     Save-DefaultPreference -Pref ([PSCustomObject]@{ InterfaceAlias = $SetDefault; DefaultMetric = 10; OtherMetric = 50 })

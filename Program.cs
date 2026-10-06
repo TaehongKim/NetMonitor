@@ -9,8 +9,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("NetMonitor")]
 [assembly: AssemblyDescription("Per-destination routing across multiple network adapters, with live monitoring")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace NetMonitor
 {
