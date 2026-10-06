@@ -30,6 +30,8 @@ if ($Deploy) {
         Where-Object { $_.Path -eq $target } | Stop-Process -Force
     Start-Sleep -Milliseconds 300
     Copy-Item $exe $Deploy -Force
-    if (-not (Test-Path (Join-Path $Deploy 'WifiRoute.ps1'))) { Copy-Item (Join-Path $bin 'WifiRoute.ps1') $Deploy }
+    # WifiRoute.ps1은 앱 코드(사용자 데이터가 아님)라서 항상 최신으로 교체한다.
+    # (이전에는 이미 있으면 건너뛰어서, 버그가 고쳐진 뒤에도 배포 PC에 예전 버전이 남았다.)
+    Copy-Item (Join-Path $bin 'WifiRoute.ps1') $Deploy -Force
     Write-Host "배포 완료: $target" -ForegroundColor Green
 }
