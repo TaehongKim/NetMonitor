@@ -9,8 +9,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("NetMonitor")]
 [assembly: AssemblyDescription("Per-destination routing across multiple network adapters, with live monitoring")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace NetMonitor
 {
@@ -231,6 +231,8 @@ namespace NetMonitor
                 if (a.Equals("--tray", StringComparison.OrdinalIgnoreCase) || a.Equals("-Tray", StringComparison.OrdinalIgnoreCase)) tray = true;
                 if (a.Equals("--demo", StringComparison.OrdinalIgnoreCase)) demo = true;     // README 스크린샷용
             }
+
+            Store.Demo = demo;     // 데모(스크린샷) 모드에서는 실제 Wi-Fi 이름 대신 가짜 이름을 보여준다
 
             // 중복 실행 방지 (데모 모드는 실행 중인 본 앱과 따로 뜰 수 있게 다른 이름 사용)
             bool created;

@@ -79,6 +79,76 @@ namespace NetMonitor
         }
     }
 
+    // ── 어댑터별 현재 접속한 Wi-Fi (WLAN API) ─────────────────────────
+    public class WlanInfo
+    {
+        public string Ssid = "";
+        public int Signal;           // 0~100
+        public int RxMbps, TxMbps;
+    }
+
+    public static class Wlan
+    {
+        [DllImport("wlanapi.dll")]
+        static extern int WlanOpenHandle(uint clientVersion, IntPtr reserved, out uint negotiatedVersion, out IntPtr handle);
+        [DllImport("wlanapi.dll")]
+        static extern int WlanCloseHandle(IntPtr handle, IntPtr reserved);
+        [DllImport("wlanapi.dll")]
+        static extern int WlanEnumInterfaces(IntPtr handle, IntPtr reserved, out IntPtr list);
+        [DllImport("wlanapi.dll")]
+        static extern int WlanQueryInterface(IntPtr handle, ref Guid iface, int opCode, IntPtr reserved, out int dataSize, out IntPtr data, IntPtr valueType);
+        [DllImport("wlanapi.dll")]
+        static extern void WlanFreeMemory(IntPtr p);
+
+        // 인터페이스 GUID("{...}", NetworkInterface.Id와 같은 형식) -> 연결 정보.
+        // WLAN AutoConfig 서비스가 없거나 연결된 무선이 없으면 빈 사전.
+        public static Dictionary<string, WlanInfo> Connected()
+        {
+            Dictionary<string, WlanInfo> res = new Dictionary<string, WlanInfo>(StringComparer.OrdinalIgnoreCase);
+            IntPtr h = IntPtr.Zero;
+            try
+            {
+                uint ver;
+                if (WlanOpenHandle(2, IntPtr.Zero, out ver, out h) != 0) return res;
+                IntPtr list;
+                if (WlanEnumInterfaces(h, IntPtr.Zero, out list) != 0) return res;
+                try
+                {
+                    int n = Marshal.ReadInt32(list, 0);
+                    for (int i = 0; i < n; i++)
+                    {
+                        int off = 8 + i * 532;                       // WLAN_INTERFACE_INFO: GUID 16 + 설명 512 + 상태 4
+                        byte[] gb = new byte[16];
+                        Marshal.Copy(new IntPtr(list.ToInt64() + off), gb, 0, 16);
+                        Guid g = new Guid(gb);
+                        if (Marshal.ReadInt32(list, off + 16 + 512) != 1) continue;   // 1 = connected
+                        IntPtr data; int size;
+                        if (WlanQueryInterface(h, ref g, 7, IntPtr.Zero, out size, out data, IntPtr.Zero) != 0) continue;   // 7 = 현재 연결
+                        try
+                        {
+                            WlanInfo w = new WlanInfo();
+                            int len = Marshal.ReadInt32(data, 520);   // WLAN_CONNECTION_ATTRIBUTES: SSID 길이 + 32바이트
+                            if (len < 0 || len > 32) len = 0;
+                            byte[] sb = new byte[len];
+                            if (len > 0) Marshal.Copy(new IntPtr(data.ToInt64() + 524), sb, 0, len);
+                            w.Ssid = Encoding.UTF8.GetString(sb);
+                            if (w.Ssid.Length == 0) w.Ssid = Marshal.PtrToStringUni(new IntPtr(data.ToInt64() + 8)) ?? "";   // 프로필 이름
+                            w.Signal = Marshal.ReadInt32(data, 576);
+                            w.RxMbps = Marshal.ReadInt32(data, 580) / 1000;
+                            w.TxMbps = Marshal.ReadInt32(data, 584) / 1000;
+                            res[g.ToString("B")] = w;
+                        }
+                        finally { WlanFreeMemory(data); }
+                    }
+                }
+                finally { WlanFreeMemory(list); }
+            }
+            catch { }
+            finally { if (h != IntPtr.Zero) WlanCloseHandle(h, IntPtr.Zero); }
+            return res;
+        }
+    }
+
     // ── 라우팅 규칙/설정 (WifiRoute.ps1과 같은 파일 사용) ────────────
     public class Rule
     {
@@ -295,6 +365,46 @@ namespace NetMonitor
             return "설치 안 됨" + when;
         }
 
+        public static bool Demo;       // --demo: 스크린샷용으로 SSID를 가짜 이름으로 바꿔 보여줌
+        static Dictionary<string, WlanInfo> wifiCache = new Dictionary<string, WlanInfo>(StringComparer.OrdinalIgnoreCase);
+        static DateTime wifiAt = DateTime.MinValue;
+        static readonly object wifiLock = new object();
+
+        // 어댑터 이름 -> 지금 접속 중인 Wi-Fi 정보(SSID, 신호). 무선이 아니거나 접속 안 된 어댑터는 들어 있지 않다.
+        // 화면 여러 곳에서 자주 부르므로 2초 동안 결과를 재사용한다 (UI 스레드와 백그라운드 스레드 양쪽에서 호출됨).
+        public static Dictionary<string, WlanInfo> WifiByName()
+        {
+            lock (wifiLock)
+            {
+                if ((DateTime.Now - wifiAt).TotalSeconds < 2) return wifiCache;
+                Dictionary<string, WlanInfo> byGuid = Wlan.Connected();
+                Dictionary<string, WlanInfo> map = new Dictionary<string, WlanInfo>(StringComparer.OrdinalIgnoreCase);
+                string[] fake = { "Office-WiFi", "Home-5G", "Phone-Hotspot" };
+                int k = 0;
+                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    WlanInfo w;
+                    if (!byGuid.TryGetValue(nic.Id, out w)) continue;
+                    if (Demo)
+                    {
+                        WlanInfo f = new WlanInfo();
+                        f.Ssid = fake[k++ % fake.Length]; f.Signal = w.Signal; f.RxMbps = w.RxMbps; f.TxMbps = w.TxMbps;
+                        w = f;
+                    }
+                    map[nic.Name] = w;
+                }
+                wifiCache = map; wifiAt = DateTime.Now;
+                return map;
+            }
+        }
+
+        // 어댑터 목록 글자 뒤에 붙일 "  · SSID" (접속한 Wi-Fi가 없으면 빈 문자열)
+        public static string NetSuffix(NetworkInterface nic)
+        {
+            WlanInfo w;
+            return WifiByName().TryGetValue(nic.Name, out w) ? "  · " + w.Ssid : "";
+        }
+
         // MAC 주소를 AA-BB-CC-DD-EE-FF 형식으로 (없으면 빈 문자열)
         public static string MacOf(NetworkInterface nic)
         {
@@ -508,7 +618,8 @@ namespace NetMonitor
     // ── 어댑터별 송수신 속도 샘플러 ─────────────────────────────
     public class Series
     {
-        public string Name, Description, Mac = "";
+        public string Name, Description, Mac = "", Ssid;     // Ssid: 지금 접속 중인 Wi-Fi 이름 (무선이 아니거나 접속 안 됐으면 null)
+        public bool Wireless;
         public List<double> Rx = new List<double>(), Tx = new List<double>();
         public long LastRx, LastTx, TotalRx, TotalTx;
         public bool Active, WasUp;
@@ -532,6 +643,7 @@ namespace NetMonitor
             double dt = now - last; if (dt <= 0) dt = 1;
             last = now;
             foreach (Series s in Items.Values) s.Active = false;
+            Dictionary<string, WlanInfo> wifi = Store.WifiByName();
 
             foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
             {
@@ -550,6 +662,9 @@ namespace NetMonitor
                 }
                 s.Description = nic.Description; s.Active = true;
                 s.Mac = Store.MacOf(nic);
+                s.Wireless = nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211;
+                WlanInfo wi;
+                s.Ssid = wifi.TryGetValue(nic.Name, out wi) ? wi.Ssid : null;
                 // 처음 보이거나 재연결된 직후에는 기준점만 잡고 0으로 기록 (누적 카운터 전체가 속도로 튀는 것 방지)
                 double rx = 0, tx = 0;
                 if (s.WasUp)
@@ -564,7 +679,7 @@ namespace NetMonitor
             }
             foreach (Series s in Items.Values)
             {
-                if (!s.Active) { s.Rx.Add(0); s.Tx.Add(0); s.WasUp = false; s.TotalRx = 0; s.TotalTx = 0; }
+                if (!s.Active) { s.Rx.Add(0); s.Tx.Add(0); s.WasUp = false; s.TotalRx = 0; s.TotalTx = 0; s.Ssid = null; }
                 while (s.Rx.Count > MaxPoints) { s.Rx.RemoveAt(0); s.Tx.RemoveAt(0); }
             }
         }

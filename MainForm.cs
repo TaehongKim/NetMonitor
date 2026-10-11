@@ -106,7 +106,7 @@ namespace NetMonitor
             foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (n.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                clb.Items.Add(n.Name + "  [" + n.OperationalStatus + "]");
+                clb.Items.Add(n.Name + "  [" + n.OperationalStatus + "]" + Store.NetSuffix(n));
             }
             Controls.Add(clb);
             if (single) clb.ItemCheck += OnSingleCheck;
@@ -155,7 +155,7 @@ namespace NetMonitor
                 foreach (int i in clb.CheckedIndices)
                 {
                     string s = clb.Items[i].ToString();
-                    Interfaces.Add(s.Substring(0, s.LastIndexOf("  [", StringComparison.Ordinal)));
+                    Interfaces.Add(s.Substring(0, s.IndexOf("  [", StringComparison.Ordinal)));   // 첫 "  [" 기준: 뒤에 붙은 SSID에 "  ["가 있어도 안전
                 }
                 if (Interfaces.Count == 0 || (!noTargetMode && Target.Length == 0))
                 {
@@ -235,7 +235,7 @@ namespace NetMonitor
             foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (n.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                clb.Items.Add(n.Name + "  [" + n.OperationalStatus + "]");
+                clb.Items.Add(n.Name + "  [" + n.OperationalStatus + "]" + Store.NetSuffix(n));
             }
             Controls.Add(clb);
             Button up = new Button { Text = "▲", Left = 358, Top = 404, Width = 34, Height = 28 };
@@ -325,7 +325,7 @@ namespace NetMonitor
                 foreach (int i in clb.CheckedIndices)
                 {
                     string s = clb.Items[i].ToString();
-                    Interfaces.Add(s.Substring(0, s.LastIndexOf("  [", StringComparison.Ordinal)));
+                    Interfaces.Add(s.Substring(0, s.IndexOf("  [", StringComparison.Ordinal)));   // 첫 "  [" 기준: 뒤에 붙은 SSID에 "  ["가 있어도 안전
                 }
                 if (Target.Length == 0 || Interfaces.Count == 0)
                 {
@@ -459,6 +459,7 @@ namespace NetMonitor
                 foreach (UnicastIPAddressInformation u in n.GetIPProperties().UnicastAddresses)
                     if (u.Address.AddressFamily == AddressFamily.InterNetwork) ipMap[u.Address.ToString()] = n.Name;
 
+            Dictionary<string, WlanInfo> wifi = Store.WifiByName();
             Dictionary<int, string> procs = new Dictionary<int, string>();
             foreach (Process p in Process.GetProcesses()) { procs[p.Id] = p.ProcessName; p.Dispose(); }
 
@@ -475,9 +476,11 @@ namespace NetMonitor
                 if (!ipMap.TryGetValue(local, out ad)) ad = "(전체/미지정)";
                 if (ad[0] != '(' && !cmbAdapter.Items.Contains(ad)) cmbAdapter.Items.Add(ad);
                 if (filter != null && filter != "(전체)" && ad != filter) continue;
+                WlanInfo wi;
+                string adShow = wifi.TryGetValue(ad, out wi) ? ad + " (" + wi.Ssid + ")" : ad;   // 어댑터 이름 뒤에 접속 중인 Wi-Fi 이름
                 string pn, rule;
                 procs.TryGetValue(r.Pid, out pn); ruleByIp.TryGetValue(remote, out rule);
-                rows.Add(new object[] { pn, r.Pid, local + ":" + r.LocalPort, remote + ":" + r.RemotePort, r.StateName, ad, rule });
+                rows.Add(new object[] { pn, r.Pid, local + ":" + r.LocalPort, remote + ":" + r.RemotePort, r.StateName, adShow, rule });
             }
             rows.Sort(delegate (object[] a, object[] b)
             {
@@ -497,7 +500,8 @@ namespace NetMonitor
         void BuildGraphTab()
         {
             legend.Dock = DockStyle.Bottom; legend.Height = 120; legend.View = View.Details; legend.FullRowSelect = true;
-            legend.Columns.Add("어댑터", 160); legend.Columns.Add("↓ 수신", 110); legend.Columns.Add("↑ 송신", 110);
+            legend.Columns.Add("어댑터", 120); legend.Columns.Add("네트워크(SSID)", 140);
+            legend.Columns.Add("↓ 수신", 100); legend.Columns.Add("↑ 송신", 100);
             legend.Columns.Add("누적 수신", 110); legend.Columns.Add("누적 송신", 110); legend.Columns.Add("설명", 300);
             Label note = new Label { Dock = DockStyle.Top, Height = 22, Text = "  실선 = 수신(↓), 점선 = 송신(↑) · 최근 60초" };
             graph.Dock = DockStyle.Fill;
@@ -516,6 +520,7 @@ namespace NetMonitor
                 if (!s.Active || s.Rx.Count == 0) continue;
                 ListViewItem it = new ListViewItem(name);
                 it.ForeColor = s.Color;
+                it.SubItems.Add(s.Ssid ?? (s.Wireless ? "-" : "유선"));      // 접속 중인 Wi-Fi 이름
                 it.SubItems.Add(Store.FormatRate(s.Rx[s.Rx.Count - 1]));
                 it.SubItems.Add(Store.FormatRate(s.Tx[s.Tx.Count - 1]));
                 it.SubItems.Add((s.TotalRx / 1048576.0).ToString("N1") + " MB");
@@ -545,6 +550,7 @@ namespace NetMonitor
             lvAdapters.CheckBoxes = true; lvAdapters.FullRowSelect = true;
             lvAdapters.Columns.Add("이름", 130); lvAdapters.Columns.Add("장치 설명", 300); lvAdapters.Columns.Add("MAC", 150);
             lvAdapters.Columns.Add("상태", 100); lvAdapters.Columns.Add("구분", 60);
+            lvAdapters.Columns.Add("접속한 Wi-Fi(SSID)", 150);       // 맨 뒤에 둬서 '구분' 열 위치(SubItems[4])가 바뀌지 않게 함
             lvAdapters.ItemChecked += delegate (object s, ItemCheckedEventArgs e)
             {
                 if (!loadingList) e.Item.SubItems[4].Text = e.Item.Checked ? "무료" : "유료";
@@ -572,11 +578,12 @@ namespace NetMonitor
             return mac;
         }
 
-        void AddAdapterRow(string name, string desc, string mac, string status, bool free)
+        void AddAdapterRow(string name, string desc, string mac, string status, bool free, string ssid)
         {
             ListViewItem it = new ListViewItem(name);
             it.SubItems.Add(desc); it.SubItems.Add(MacDisplay(mac)); it.SubItems.Add(status);
             it.SubItems.Add(free ? "무료" : "유료");
+            it.SubItems.Add(ssid ?? "-");
             it.Tag = new string[] { name, mac, desc };
             if (status != "연결됨") it.ForeColor = SystemColors.GrayText;
             it.Checked = free;
@@ -593,17 +600,20 @@ namespace NetMonitor
         {
             loadingList = true; lvAdapters.BeginUpdate(); lvAdapters.Items.Clear();
             List<FreeEntry> unmatched = new List<FreeEntry>(settings.FreeAdapters);
+            Dictionary<string, WlanInfo> wifi = Store.WifiByName();
             foreach (NetworkInterface n in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (n.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
                     n.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
                 string mac = Store.MacOf(n), name = n.Name, desc = n.Description;
+                if (demo && desc.StartsWith("TAP-Windows")) desc = "TAP-Windows Adapter V9";     // 스크린샷에 VPN 제품명이 드러나지 않게
                 unmatched.RemoveAll(delegate (FreeEntry e) { return e.Matches(name, mac, desc); });
+                WlanInfo wi;
                 AddAdapterRow(name, desc, mac, n.OperationalStatus == OperationalStatus.Up ? "연결됨" : "끊김",
-                    settings.IsFree(name, mac, desc));
+                    settings.IsFree(name, mac, desc), wifi.TryGetValue(name, out wi) ? wi.Ssid : null);
             }
             // 지금은 없지만 무료로 저장해 둔 어댑터(USB 동글을 뽑아둔 경우 등)도 목록에 유지
-            foreach (FreeEntry e in unmatched) AddAdapterRow(e.Name, e.Description, e.Mac, "없음(저장됨)", true);
+            foreach (FreeEntry e in unmatched) AddAdapterRow(e.Name, e.Description, e.Mac, "없음(저장됨)", true, null);
             numThreshold.Value = (decimal)Math.Min(settings.PaidThresholdKBps, 1000000);
             lvAdapters.EndUpdate(); loadingList = false;
         }
@@ -628,13 +638,13 @@ namespace NetMonitor
         void ShowDemoConnections()
         {
             object[][] rows = {
-                new object[] { "chrome", 4120, "172.16.12.20:51324", "198.51.100.10:443", "Established", "Wi-Fi 4", null },
-                new object[] { "chrome", 4120, "172.16.12.20:51330", "198.51.100.24:443", "Established", "Wi-Fi 4", null },
-                new object[] { "Teams", 8844, "172.16.12.20:51402", "203.0.113.5:443", "Established", "Wi-Fi 4", null },
-                new object[] { "OneDrive", 6012, "172.16.12.20:51477", "198.51.100.88:443", "Established", "Wi-Fi 4", null },
-                new object[] { "code", 7320, "172.16.12.20:51520", "203.0.113.41:443", "Established", "Wi-Fi 4", null },
-                new object[] { "ssh", 9210, "192.168.0.20:52011", "203.0.113.10:22", "Established", "Wi-Fi", "files.example.com" },
-                new object[] { "rsync", 9288, "192.168.0.20:52140", "203.0.113.10:873", "Established", "Wi-Fi", "files.example.com" },
+                new object[] { "chrome", 4120, "172.16.12.20:51324", "198.51.100.10:443", "Established", "Wi-Fi 4 (Office-WiFi)", null },
+                new object[] { "chrome", 4120, "172.16.12.20:51330", "198.51.100.24:443", "Established", "Wi-Fi 4 (Office-WiFi)", null },
+                new object[] { "Teams", 8844, "172.16.12.20:51402", "203.0.113.5:443", "Established", "Wi-Fi 4 (Office-WiFi)", null },
+                new object[] { "OneDrive", 6012, "172.16.12.20:51477", "198.51.100.88:443", "Established", "Wi-Fi 4 (Office-WiFi)", null },
+                new object[] { "code", 7320, "172.16.12.20:51520", "203.0.113.41:443", "Established", "Wi-Fi 4 (Office-WiFi)", null },
+                new object[] { "ssh", 9210, "192.168.0.20:52011", "203.0.113.10:22", "Established", "Wi-Fi (Home-5G)", "files.example.com" },
+                new object[] { "rsync", 9288, "192.168.0.20:52140", "203.0.113.10:873", "Established", "Wi-Fi (Home-5G)", "files.example.com" },
             };
             gridConn.Rows.Clear();
             foreach (object[] r in rows) gridConn.Rows.Add(r);
@@ -645,9 +655,9 @@ namespace NetMonitor
         {
             gridRules.Rows.Clear();
             object[][] rows = {
-                new object[] { "files.example.com", "203.0.113.10", "Wi-Fi > 이더넷", 1, "-", "Wi-Fi (정상)" },
-                new object[] { "app.example.org", "203.0.113.25 외 3개", "Wi-Fi", 1, "8.8.8.8", "Wi-Fi (정상) · IP 4개" },
-                new object[] { "cdn.example.net", "198.51.100.77", "Wi-Fi", 1, "1.1.1.1", "Wi-Fi 4 (불일치)" },
+                new object[] { "files.example.com", "203.0.113.10", "Wi-Fi (Home-5G) > 이더넷", 1, "-", "Wi-Fi (정상)" },
+                new object[] { "app.example.org", "203.0.113.25 외 3개", "Wi-Fi (Home-5G)", 1, "8.8.8.8", "Wi-Fi (정상) · IP 4개" },
+                new object[] { "cdn.example.net", "198.51.100.77", "Wi-Fi (Home-5G)", 1, "1.1.1.1", "Wi-Fi 4 (불일치)" },
             };
             foreach (object[] r in rows)
             {
@@ -699,6 +709,7 @@ namespace NetMonitor
                 List<Rule> rules = Store.LoadRulesWithStatus();
                 string def = Store.DefaultInterface();
                 string task = Store.AutoSyncStatus();
+                Dictionary<string, WlanInfo> wifi = Store.WifiByName();
                 try
                 {
                     BeginInvoke((MethodInvoker)delegate
@@ -707,7 +718,7 @@ namespace NetMonitor
                         Dictionary<string, string> map = new Dictionary<string, string>();
                         foreach (Rule r in rules)
                         {
-                            int i = gridRules.Rows.Add(r.Target, r.Ip, string.Join(" > ", r.Aliases.ToArray()), r.Metric,
+                            int i = gridRules.Rows.Add(r.Target, r.Ip, AliasText(r.Aliases, wifi), r.Metric,
                                 r.Dns.Length > 0 ? r.Dns : "-", r.Actual);
                             gridRules.Rows[i].Cells[5].Style.ForeColor = r.Ok ? Color.ForestGreen : Color.Firebrick;
                             foreach (string ip in r.Ips) map[ip] = r.Target;     // 연결 탭 '적용 규칙' 열용
@@ -719,6 +730,18 @@ namespace NetMonitor
                 }
                 catch (InvalidOperationException) { }   // 창 핸들이 아직 없거나 이미 닫힌 경우
             });
+        }
+
+        // 규칙의 어댑터 우선순위 목록 표시. 지금 Wi-Fi에 접속 중인 어댑터는 이름 뒤에 SSID를 붙인다: "Wi-Fi (Home-5G) > 이더넷"
+        static string AliasText(List<string> aliases, Dictionary<string, WlanInfo> wifi)
+        {
+            List<string> parts = new List<string>();
+            foreach (string a in aliases)
+            {
+                WlanInfo w;
+                parts.Add(wifi.TryGetValue(a, out w) ? a + " (" + w.Ssid + ")" : a);
+            }
+            return string.Join(" > ", parts.ToArray());
         }
 
         // WifiRoute.ps1 실행(UAC 대기 포함)은 백그라운드에서
